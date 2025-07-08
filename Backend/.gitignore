@@ -1,0 +1,23 @@
+# System
+.DS_Store
+
+# Virtual environment
+env/
+venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.log
+
+
+
+# Environment variables
+.env
+.env.*
+
+
+
+# IDEs/editors
+.vscode/
+.idea/
