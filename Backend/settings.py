@@ -103,8 +103,7 @@ CORS_ALLOWED_ORIGINS = [
     "http://localhost:5173",  # Vite frontend
 ]
 
-# If you want to allow all origins instead, comment the above and use:
-# CORS_ALLOW_ALL_ORIGINS = True
+
 
 # If you send cookies or JWT via fetch from frontend
 CORS_ALLOW_CREDENTIALS = True
