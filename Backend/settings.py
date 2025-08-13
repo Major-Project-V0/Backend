@@ -107,3 +107,4 @@ CORS_ALLOWED_ORIGINS = [
 
 # If you send cookies or JWT via fetch from frontend
 CORS_ALLOW_CREDENTIALS = True
+#hello
