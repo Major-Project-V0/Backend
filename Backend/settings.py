@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "corsheaders",
 
     "accounts",
+    "detections",
 ]
 
 REST_FRAMEWORK = {
