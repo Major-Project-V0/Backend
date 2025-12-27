@@ -117,3 +117,8 @@ The `interview.jsx` component:
 ### Model files not found
 - Ensure `ridge_model.pkl` and `label_encoder.pkl` are in `Backend/Models/` directory
 
+### MediaPipe parsing errors
+- If you see "Failed to parse: node {...}" error, see `MEDIAPIPE_TROUBLESHOOTING.md` for detailed solutions
+- Quick fix: `pip uninstall mediapipe -y && pip install mediapipe==0.10.7`
+- Or try: `pip install --upgrade mediapipe` to use the latest version
+

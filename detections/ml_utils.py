@@ -6,17 +6,48 @@ import sys
 import cv2
 import numpy as np
 import joblib
-import mediapipe as mp
 from pathlib import Path
 
 # Add Models directory to path
 BASE_DIR = Path(__file__).resolve().parent.parent
 MODELS_DIR = BASE_DIR / "Models"
 
-# Initialize MediaPipe components
-mp_holistic = mp.solutions.holistic
-mp_face_detection = mp.solutions.face_detection
-mp_drawing = mp.solutions.drawing_utils
+# Initialize MediaPipe components with error handling
+try:
+    import mediapipe as mp
+    
+    # Check MediaPipe version
+    mp_version = getattr(mp, '__version__', 'unknown')
+    print(f"MediaPipe version: {mp_version}")
+    
+    # Try to access solutions module
+    if not hasattr(mp, 'solutions'):
+        raise AttributeError(
+            f"MediaPipe {mp_version} does not have 'solutions' attribute. "
+            f"This usually indicates a corrupted installation. "
+            f"Try: pip uninstall mediapipe -y && pip install mediapipe==0.10.7"
+        )
+    
+    mp_holistic = mp.solutions.holistic
+    mp_face_detection = mp.solutions.face_detection
+    mp_drawing = mp.solutions.drawing_utils
+    
+except ImportError as e:
+    raise ImportError(
+        f"Failed to import MediaPipe: {e}\n"
+        f"Please install MediaPipe: pip install mediapipe==0.10.7"
+    )
+except AttributeError as e:
+    raise AttributeError(
+        f"MediaPipe installation appears corrupted: {e}\n"
+        f"Try reinstalling:\n"
+        f"  pip uninstall mediapipe -y\n"
+        f"  pip install mediapipe==0.10.7\n"
+        f"Or if using virtual environment:\n"
+        f"  source .venv/bin/activate  # or env/bin/activate\n"
+        f"  pip uninstall mediapipe -y\n"
+        f"  pip install mediapipe==0.10.7"
+    )
 
 # Global variables for loaded models (singleton pattern)
 _posture_model = None
@@ -48,11 +79,35 @@ def get_holistic_processor():
     global _holistic
     
     if _holistic is None:
-        _holistic = mp_holistic.Holistic(
-            static_image_mode=True,  # Use True for single image processing
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5
-        )
+        try:
+            # Try with default settings first
+            _holistic = mp_holistic.Holistic(
+                static_image_mode=True,  # Use True for single image processing
+                min_detection_confidence=0.5,
+                min_tracking_confidence=0.5,
+                model_complexity=1  # Use medium complexity (0=lite, 1=full, 2=heavy)
+            )
+        except Exception as e:
+            # If that fails, try with minimal settings
+            print(f"Warning: Failed to initialize Holistic with default settings: {e}")
+            print("Attempting with minimal settings...")
+            try:
+                _holistic = mp_holistic.Holistic(
+                    static_image_mode=True,
+                    min_detection_confidence=0.3,
+                    min_tracking_confidence=0.3,
+                    model_complexity=0  # Use lite model
+                )
+            except Exception as e2:
+                print(f"Error: Failed to initialize Holistic with minimal settings: {e2}")
+                raise RuntimeError(
+                    f"MediaPipe Holistic initialization failed. "
+                    f"This may be due to:\n"
+                    f"1. Incompatible MediaPipe version - try: pip install --upgrade mediapipe\n"
+                    f"2. Missing model files - MediaPipe should download them automatically\n"
+                    f"3. System compatibility issues\n"
+                    f"Original error: {str(e2)}"
+                )
     
     return _holistic
 
@@ -62,10 +117,20 @@ def get_face_detection_processor():
     global _face_detection
     
     if _face_detection is None:
-        _face_detection = mp_face_detection.FaceDetection(
-            model_selection=0,  # 0 for short-range, 1 for full-range
-            min_detection_confidence=0.5
-        )
+        try:
+            _face_detection = mp_face_detection.FaceDetection(
+                model_selection=0,  # 0 for short-range, 1 for full-range
+                min_detection_confidence=0.5
+            )
+        except Exception as e:
+            print(f"Error: Failed to initialize Face Detection: {e}")
+            raise RuntimeError(
+                f"MediaPipe Face Detection initialization failed. "
+                f"This may be due to:\n"
+                f"1. Incompatible MediaPipe version - try: pip install --upgrade mediapipe\n"
+                f"2. Missing model files\n"
+                f"Original error: {str(e)}"
+            )
     
     return _face_detection
 
