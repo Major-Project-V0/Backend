@@ -1,223 +1,117 @@
 import numpy as np
 import sounddevice as sd
 import librosa
-import noisereduce as nr
-import time
 import torch
-from transformers import Wav2Vec2ForSequenceClassification, Wav2Vec2Processor
-import scipy.signal as signal
+from scipy.signal import butter, lfilter
+from transformers import Wav2Vec2Processor, Wav2Vec2ForSequenceClassification
+import time
 
+# ======================================================
+# CONFIG
+# ======================================================
+MODEL_DIR = "wav2vec2_emotion_final"
+SR = 16000
+FRAME = 1.3                   # match training audio length (~1–2 sec)
+LISTEN_TIME = 30
+TEMP = 0.9                      # soften predictions
+TARGET_RMS = 0.1                # match training loudness
 
-# ============================================================
-#  LOAD WAV2VEC2 MODEL + PROCESSOR
-# ============================================================
+print("Loading model...")
+processor = Wav2Vec2Processor.from_pretrained(MODEL_DIR)
+model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_DIR)
+model.eval()
+EMOTIONS = list(model.config.id2label.values())
+print("Model loaded!")
 
-MODEL_PATH = "wave2vec2_model"   # Your trained model folder
+# ======================================================
+# PREPROCESSING FUNCTIONS
+# ======================================================
 
-try:
-    processor = Wav2Vec2Processor.from_pretrained(MODEL_PATH)
-    model = Wav2Vec2ForSequenceClassification.from_pretrained(MODEL_PATH)
-    print("📦 Model loaded successfully!")
-except Exception as e:
-    print("\n❌ ERROR: Could not load model")
-    print(e)
-    exit()
+def butter_bandpass(lowcut, highcut, fs, order=4):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return b, a
 
+def bandpass_filter(data, lowcut=100, highcut=3400, fs=16000):
+    b, a = butter_bandpass(lowcut, highcut, fs)
+    return lfilter(b, a, data)
 
-EMOTIONS = ["neutral", "happy", "sad", "angry", "fear", "disgust", "surprised"]
+def normalize_rms(audio, target_rms=TARGET_RMS):
+    rms = np.sqrt(np.mean(audio**2))
+    if rms < 1e-6:
+        return audio
+    return audio * (target_rms / rms)
 
+def trim_silence(audio):
+    trimmed, _ = librosa.effects.trim(audio, top_db=25)
+    return trimmed
 
-# ============================================================
-#  AUDIO PREPROCESSOR — CRUCIAL FOR ACCURATE RESULTS
-# ============================================================
+def pitch_normalize(audio):
+    return librosa.effects.pitch_shift(audio, sr=SR, n_steps=-1.5)
 
-def preprocess_audio(audio, sr=16000):
-    """
-    Matches microphone audio to dataset characteristics.
-    Removes silence, normalizes volume, reduces noise,
-    and performs slight pitch normalization.
-    """
+def match_length(audio, target_len=FRAME*SR):
+    target_len = int(target_len)
+    if len(audio) > target_len:
+        return audio[:target_len]
+    pad_len = target_len - len(audio)
+    return np.pad(audio, (0, pad_len))
 
-    # Convert to float32
-    audio = audio.astype(np.float32)
+def preprocess_audio(audio):
+    audio = audio.flatten().astype(np.float32)
 
-    # -------------------------
-    # 1️⃣ Remove silence
-    # -------------------------
-    audio, _ = librosa.effects.trim(audio, top_db=25)
-
-    # If silence only
-    if len(audio) < 1000:
-        return None
-
-    # -------------------------
-    # 2️⃣ Loudness Normalization
-    # -------------------------
-    if np.max(np.abs(audio)) > 0:
-        audio = audio / np.max(np.abs(audio))
-
-    # -------------------------
-    # 3️⃣ Noise Reduction
-    # -------------------------
-    audio = nr.reduce_noise(y=audio, sr=sr, prop_decrease=0.9)
-
-    # -------------------------
-    # 4️⃣ Pitch Normalization
-    #    Shifts pitch slightly so deep voices don’t break the model
-    # -------------------------
-    audio = librosa.effects.pitch_shift(audio, sr=sr, n_steps=-1)
-
-    # -------------------------
-    # 5️⃣ Bandpass Filter (telephone-like, same as many datasets)
-    # -------------------------
-    b, a = signal.butter(4, [300/(sr/2), 3400/(sr/2)], btype='band')
-    audio = signal.filtfilt(b, a, audio)
-
-    # -------------------------
-    # 6️⃣ Final normalization
-    # -------------------------
-    audio = audio / (np.max(np.abs(audio)) + 1e-6)
+    # * EXACT MATCH TO TRAINING DISTRIBUTION *
+    audio = bandpass_filter(audio)
+    audio = trim_silence(audio)
+    audio = normalize_rms(audio)
+    audio = pitch_normalize(audio)
+    audio = match_length(audio)
 
     return audio
 
-
-# ============================================================
-#  SPEECH / SILENCE DETECTION
-# ============================================================
-
-def compute_amplitude(audio):
-    return float(np.max(np.abs(audio)))
-
-
-def is_silent(audio, threshold=0.02):
-    return compute_amplitude(audio) < threshold
-
-
-# ============================================================
-#  MICROPHONE TESTER
-# ============================================================
-
-def test_microphone(device_id, sr=16000):
-    print("\n🎤 Testing microphone, speak NOW for 2 seconds...")
-
-    try:
-        audio = sd.rec(int(2 * sr), samplerate=sr, channels=1,
-                       dtype="float32", device=device_id)
-        sd.wait()
-    except Exception as e:
-        print("❌ Microphone error:", e)
-        return False
-
-    audio = audio.flatten()
-    amp = compute_amplitude(audio)
-    print(f"⭐ Test amplitude = {amp}")
-
-    if amp < 0.02:
-        print("❌ Mic not capturing enough sound.")
-        return False
-
-    print("✅ Microphone OK!")
-    return True
-
-
-# ============================================================
-#  EMOTION PREDICTION
-# ============================================================
-
-def predict_emotion(clean_audio):
-    inputs = processor(clean_audio, sampling_rate=16000,
-                       return_tensors="pt", padding=True)
+def predict(audio):
+    inputs = processor(audio, sampling_rate=SR, return_tensors="pt", padding=True)
 
     with torch.no_grad():
         logits = model(inputs.input_values).logits
 
+    logits = logits / TEMP  # soften confidence
     probs = torch.softmax(logits, dim=-1).numpy()[0]
     return probs
 
+# ======================================================
+# MAIN LOOP
+# ======================================================
 
-# ============================================================
-#  MAIN PROGRAM
-# ============================================================
+print("\n🎤 Speak now... (Listening for {} seconds)\n".format(LISTEN_TIME))
+start = time.time()
+history = []
 
-def main():
-    print("\n======================================")
-    print("🔊 AVAILABLE AUDIO INPUT DEVICES")
-    print("======================================")
+while time.time() - start < LISTEN_TIME:
+    raw = sd.rec(int(FRAME * SR), samplerate=SR, channels=1, dtype="float32")
+    sd.wait()
 
-    devices = sd.query_devices()
+    processed = preprocess_audio(raw)
+    probs = predict(processed)
+    history.append(probs)
 
-    input_ids = []
-    for idx, d in enumerate(devices):
-        if d["max_input_channels"] > 0:
-            print(f"{idx}: {d['name']}  (channels={d['max_input_channels']})")
-            input_ids.append(idx)
+    print("\n--- Frame Prediction ---")
+    for e, p in zip(EMOTIONS, probs):
+        print(f"{e:10}: {p*100:.2f}%")
 
-    device_id = int(input("\n🎤 Enter microphone Device ID: "))
-    print(f"\nUsing microphone ID {device_id}")
+# ======================================================
+# FINAL OUTPUT
+# ======================================================
+final = np.mean(history, axis=0)
+dom = EMOTIONS[np.argmax(final)]
 
-    # Mic test
-    if not test_microphone(device_id):
-        print("\n❌ Try another device.")
-        exit()
+print("\n===============================")
+print("📊 FINAL AVERAGE EMOTION")
+print("===============================")
+for e, p in zip(EMOTIONS, final):
+    print(f"{e:10}: {p*100:.2f}%")
 
-    print("\n🎙 Speak now… (listening for 60 seconds)")
-    print("----------------------------------------------------")
+print("\n🧠 Dominant Emotion:", dom.upper())
+print("===============================\n")
 
-    SR = 16000
-    FRAME = 5
-    DURATION = 60
-
-    emotion_scores = []
-    start = time.time()
-
-    while time.time() - start < DURATION:
-
-        audio = sd.rec(int(FRAME * SR), samplerate=SR,
-                       channels=1, dtype="float32", device=device_id)
-        sd.wait()
-
-        audio = audio.flatten()
-
-        amp = compute_amplitude(audio)
-        print(f"[DEBUG] Frame amplitude = {amp}")
-
-        if is_silent(audio):
-            print("[SKIPPED] Silence detected...")
-            continue
-
-        # Preprocess audio
-        clean = preprocess_audio(audio, SR)
-        if clean is None:
-            print("[SKIPPED] Cleaned audio still too silent.")
-            continue
-
-        # Predict
-        probs = predict_emotion(clean)
-        emotion_scores.append(probs)
-
-        print("\nFrame Emotion Probabilities:")
-        for emo, p in zip(EMOTIONS, probs):
-            print(f"  {emo:10s}: {p*100:.2f}%")
-
-    if len(emotion_scores) == 0:
-        print("\n❌ No speech detected. Try again.")
-        return
-
-    avg = np.mean(emotion_scores, axis=0)
-
-    print("\n====================================")
-    print("📊 FINAL AVERAGE EMOTION RESULTS")
-    print("====================================")
-
-    for emo, p in zip(EMOTIONS, avg):
-        print(f"  {emo:10s}: {p*100:.2f}%")
-
-    final_emotion = EMOTIONS[np.argmax(avg)]
-    print("\n🧠 Dominant Emotion:", final_emotion.upper())
-
-
-# ============================================================
-#  RUN
-# ============================================================
-if __name__ == "__main__":
-    main()
